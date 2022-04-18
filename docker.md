@@ -140,6 +140,7 @@ Docker Compose 使用 YAML 文件来定义多服务的应用.默认使用文件�
 
 Compose 文件中的 services 部分定义了 多个二级key ,每个key代表容器的名字的一部分
 每个key中可以包含如下指令：
+
 - build： 指定 Docker 基于当前目录（.）下 Dockerfile 中定义的指令来构建一个新镜像。该镜像会被用于启动该服务的容器。
 - command： 指定 Docker 在容器中执行脚本作为主程序。
 - ports： 指定 Docker 将容器内的  端口映射到主机的 5000 端口。

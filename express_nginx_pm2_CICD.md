@@ -367,20 +367,195 @@ COPY ./conf/default.conf /etc/nginx/conf.d/default.conf
 新建 default.conf 配置内容，以便copy到容器中使用
 如：
 
+``` bash
 server {
     listen       8090;  # 配置端口
     server_name  localhost; # 配置域名
     location / {
-        proxy_pass <http://172.17.0.2:3000>;  # 这里的172.17.0.2 对应的是步骤3的Ip地址
+        proxy_pass http://172.17.0.2:3000;  # 这里的172.17.0.2 对应的是步骤3的Ip地址
     }
     error_page   500 502 503 504  /50x.html; #错误状态码显示页面，配置需要重启
     location = /50x.html {
         root   html;
     }
 }
+```
+
+访问`localhost:8090` 就实现了实际访问的是 `http://172.17.0.2:3000`
+
 进入容器 docker exec -it 容器名 bash 可以做一些你想要的的操作
 
-5. 到目前位置，我们创建了两个容器，如果我们在创建一个db的容器就是三个了，那我们有没有可以统一管理这些容器了，下面我们会使用Docker Compose 来管理多个容器
+上面实现了容器互联的 一种方式，这种方式需要我们知道容器的ip才能实现互联，在实际使用中并不实用。
+第二种方式是 用link参数实现容器互联，如：
+
+``` shell
+# 第一个容器
+docker run -it -name centos-1 docker.io/centos:latest
+# 第二个容器
+docker run -it -name centos-2 --link centos-1:centos-1 docker.io/centos:latest
+# –link：参数中第一个centos-1是容器名，第二个centos-1是定义的容器别名（使用别名访问容器），为了方便使用，一般别名默认容器名。
+# 此方法对容器创建的顺序有要求，如果集群内部多个容器要互访，使用就不太方便。
+```
+
+第三种方式：
+创建bridge网络：docker network create 网络名称
+查询网络： docker network ls
+运行容器连接到testnet网络： docker run -it --name <容器名> --network 网络名称 --network-alias <网络别名> <镜像名>
+访问容器中服务，可以使用这用方式访问 <网络别名>：<服务端口号>
+推荐使用这种方法，自定义网络，因为使用的是网络别名，可以不用顾虑ip是否变动，只要连接到docker内部bright网络即可互访。bridge也可以建立多个，隔离在不同的网段。
+
+我们采用第三种方式修改第一种访问方式：
+
+```bash
+# 创建网络testnet
+docker network create testnet
+# 启动容器连接该网络
+docker run -d --name webapp-network --network testnet --network-alias webapp-network -p 3000:3000 xxjun:webapp2
+# 修改ningx default.conf
+server {
+    listen       8090;  # 配置端口
+    server_name  localhost; # 配置域名
+    location / {
+        proxy_pass http://webapp-network:3000;  # 这里使用的是网络别名
+    }
+    error_page   500 502 503 504  /50x.html; #错误状态码显示页面，配置需要重启
+    location = /50x.html {
+        root   html;
+    }
+}
+# 构建镜像
+docker build -t xxjun:nginxv2 .
+# 启动容器
+docker run -d --name nginxv2 --network testnet --network-alias ngingxv2 -p 8090:8090 xxjun:nginxv2
+# 访问成功响应
+localhost:8090 
+```
+
+5. 我们来修改package.json,来用容器部署
+
+```json
+  "scripts": {
+    "start": "node ./bin/www",
+    "setup": "pm2 deploy production setup",
+    "deploy": "pm2 deploy production --force",
+    "docker-build": "git pull && npm install && docker build -t docker:webapp .",
+    "docker-run": "docker container rm webapp-network && docker run -d --name webapp-network --network testnet --network-alias webapp-network -p 3000:3000 docker:webapp"
+  },
+```
+
+修改代码后，执行npm run docker-build  和 npm run docker-run 就会获得新的容器
+
+6. 创建一个mondodb 容器
+
+启动mongobd容器
+`docker run -d -p 27017:27017 --name webapp-mongo --network testnet -v $PWD/db:/data/db mongo`
+启动webapp容器
+docker build -t webapp:v1 .
+docker run -d --name webapp1 --network testnet --network-alias webapp-nginx-domain -p 3000:3000 webapp:v1
+启动nginx
+docker build -t nginx:v1 .
+docker run -d --name nginx1 --network testnet  -p 8090:8090 nginx:v1
+访问 localhost:8090
+
+注： 您可以通过在创建容器时设置MONGO_INITDB_ROOT_USERNAME和MONGODB_INITDB_ROOT_PASSWORD环境变量来添加初始用户帐户：
+docker run -d \
+ -p 27017:27017 \
+ --name example-mongo \
+  -v mongo-data:/data/db \
+  -e MONGODB_INITDB_ROOT_USERNAME=example-user \
+     -e MONGODB_INITDB_ROOT_PASSWORD=example-pass \
+          mongo:latest
+考虑到与此帐户相关的权力，将其密码作为纯文本环境变量提供可能会出现问题。更安全的方法是将密码作为文件注入：
+docker run -d \
+ -p 27017:27017 \
+ --name example-mongo \
+ -v mongo-data:/data/db \
+  -e MONGODB_INITDB_ROOT_USERNAME=example-user \
+     -e MONGODB_INITDB_ROOT_PASSWORD_FILE=/run/secrets/mongo-root-pw \
+            mongo:latest
+您可以通过将一个 Mongo 配置文件安装到您的容器中来添加一个 Mongo 配置文件：
+docker run -d \
+ --name example-mongo \
+   -v mongo-data:/data/db \
+     -v ./mongo.conf:/etc/mongo/mongo.conf mongo:latest --config /etc/mongo/mongo.conf
+
+7. 到目前位置，我们创建了三个容器，每次部署三个容器也很麻烦，那有没有可以统一管理这些容器的方式呢？下面我们会使用Docker Compose 来管理多个容器的部署.
+重新完整的用docker来部署web/nginx/pm2/mongodb的应用
+
+``` shell
+# 创建my blog应用
+mkdir myblog && cd myblog
+npx express-generator --view=ejs --ejs --git
+git init && npm install && npm run start
+# 访问 localhost:3000 能看到 Welcome to Express
+pm2 ecosystem # 生成ecosystem文件
+# 指定端口
+export port=3001 && npm run start
+# 配置docker-compose.yaml
+```
+
+version: "3.7"
+services:
+  server1:
+    container_name: webapp1
+    build: ./
+    ports:
+      - "3000:3000"
+    networks:
+      - testnet
+    depends_on:
+      - mongo
+  server2:
+    container_name: webapp2
+    build:
+      context: ./
+      dockerfile: Dockerfile1
+    ports:
+      - "3001:3001"
+    networks:
+      - testnet
+    depends_on:
+      - mongo
+  nginx:
+    container_name: nginx
+    build:
+      context: ./config/nginx
+    ports:
+      - 8090:8090
+    networks:
+      - testnet
+    depends_on:
+      - server1
+      - server2
+  mongo:
+    container_name: mongo
+    image: mongo:latest
+    volumes:
+      - ./_db/mongo:/data/db #host_db:container_db
+    ports:
+      - 27017:27017
+    restart: always
+    networks:
+      - testnet
+networks:
+  testnet:
+
+```
+
+注： 使用mongo的时候，不能使用pm2 启动会报错。原因未知？？？？
+服务器上不要用apt install 安装docker-compose
+(1) sudo apt-get remove docker-compose OR sudo rm /usr/local/bin/docker-compose
+
+(2) sudo curl -L "https://github.com/docker/compose/releases/download/填写版本号/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+
+(3) sudo chmod +x /usr/local/bin/docker-compose
+
+(4) sudo ln -s /usr/local/bin/docker-compose /usr/bin/docker-compose
+注意： 启动失败可以使用命令 docker container ls -a  查看信息
+然后使用 docker logs xxx
+
+到此我们用docker 部署已经全部完成
+相关代码地址： https://github.com/xj0707/myblog.git
 
 ## 六、常用的命令汇总
 
